@@ -24,6 +24,8 @@ const CONFIG = {
     { fromCode: '2000000', toCode: '2078144', label: 'Москва → Керчь Южная (+бесплатный автобус до Симферополя)' },
     { fromCode: '2000000', toCode: '2078770', label: 'Москва → Евпатория-Курорт' },
     { fromCode: '2000000', toCode: '2078860', label: 'Москва → Саки' },
+    // Не Крым, но популярное направление с большей вероятностью мест; дальше в Крым нужен отдельный автобус самостоятельно
+    { fromCode: '2000000', toCode: '2064788', label: 'Москва → Краснодар (дальше автобус до Крыма самостоятельно)' },
   ],
   SEARCH: {
     dates: ['13.07.2026', '14.07.2026', '15.07.2026'],
@@ -81,7 +83,13 @@ function parseSeatCounts(seatsLine) {
 function parsePlackartTrains(pageText, { minLower = 1, minTotal = 3 } = {}) {
   const found = [];
 
-  const segments = pageText.split(/\nВыбрать\n/);
+  // Выше первого поезда на странице есть статичная строка-фильтр "Плац" (вкладка сортировки по классам,
+  // не привязана к конкретному поезду) — без обрезки она ложно матчится как первая "Плац" вместо реальной.
+  // Список поездов начинается с первой строки-времени вида "23:55".
+  const firstTimeMatch = pageText.match(/^\d{2}:\d{2}$/m);
+  const listingsText = firstTimeMatch ? pageText.slice(firstTimeMatch.index) : pageText;
+
+  const segments = listingsText.split(/\nВыбрать\n/);
 
   // segments[i] заканчивается расписанием+ценами поезда i; segments[i+1] начинается с №номера и маршрута этого же поезда i
   for (let i = 0; i < segments.length - 1; i++) {
