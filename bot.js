@@ -62,10 +62,22 @@ async function initBrowser() {
   return browser;
 }
 
+// Разбирает строку вида "1 низ", "1 ниж, 5 вер" на количество нижних/верхних мест.
+// Точное соседство мест страница не показывает (только агрегат по вагону/классу) —
+// это только грубый фильтр "в принципе может хватить", реальное соседство проверяется вручную по ссылке.
+function parseSeatCounts(seatsLine) {
+  const lowerMatch = seatsLine.match(/(\d+)\s*ни[жз]/i);
+  const upperMatch = seatsLine.match(/(\d+)\s*вер[хс]?/i);
+  const lower = lowerMatch ? parseInt(lowerMatch[1], 10) : 0;
+  const upper = upperMatch ? parseInt(upperMatch[1], 10) : 0;
+  return { lower, upper, total: lower + upper };
+}
+
 // Разбивает текст страницы на блоки по поездам и ищет плацкарт с ценой/местами.
 // Структура на странице для каждого поезда: время_отправления...время_прибытия...классы+цены...Выбрать...№номер...маршрут...теги
 // "Выбрать" встречается ровно 1 раз на поезд и отделяет его расписание+цены (до) от номера+маршрута (сразу после).
-function parsePlackartTrains(pageText) {
+// MIN_LOWER/MIN_TOTAL — минимальные требования: хотя бы 1 нижнее и хотя бы 3 места всего (нужно 3 рядом, 1 из них нижнее).
+function parsePlackartTrains(pageText, { minLower = 1, minTotal = 3 } = {}) {
   const found = [];
 
   const segments = pageText.split(/\nВыбрать\n/);
@@ -92,12 +104,18 @@ function parsePlackartTrains(pageText) {
     const priceMatch = priceLine.match(/от\s*([\d\s]+,\d+)\s*₽/);
     const isWaitlist = seatsLine.includes('Лист ожидания') || priceLine.includes('Лист ожидания');
 
-    if (!isWaitlist && priceMatch) {
+    const counts = parseSeatCounts(seatsLine);
+    const meetsRequirement = counts.lower >= minLower && counts.total >= minTotal;
+
+    if (!isWaitlist && priceMatch && meetsRequirement) {
       found.push({
         departureTime,
         trainNumber,
         route,
         seats: seatsLine,
+        lower: counts.lower,
+        upper: counts.upper,
+        total: counts.total,
         price: priceMatch[1].trim() + ' ₽'
       });
     }
@@ -189,8 +207,10 @@ async function notifyAboutTickets(info) {
 📅 Дата: ${info.date}
 🚂 Поезд №${info.trainNumber} (${info.route})
 ⏰ Отправление: ${info.departureTime}
-💺 Места: ${info.seats}
+💺 Места: ${info.seats} (нижних: ${info.lower}, верхних: ${info.upper}, всего: ${info.total})
 💰 Цена: от ${info.price}
+
+⚠️ Это агрегат по вагону/классу, НЕ гарантия что 3 места рядом — проверь на сайте вручную перед покупкой!
 
 🔗 Открыть и забронировать:
 ${info.url}
