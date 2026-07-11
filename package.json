@@ -1,6 +1,6 @@
 {
   "name": "rzd-train-bot",
-  "version": "1.0.0",
+  "version": "3.0.0-rzd-api",
   "description": "РЖД бот для поиска билетов на поезд Москва-Симферополь",
   "main": "bot.js",
   "scripts": {
