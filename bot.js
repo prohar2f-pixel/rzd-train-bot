@@ -14,9 +14,17 @@ process.on('unhandledRejection', (reason) => {
 const CONFIG = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
+  // Каждый маршрут проверяется отдельно на все даты.
+  // Крымские станции, кроме Симферополя, тоже подходят — дальше автобусом/электричкой.
+  ROUTES: [
+    { fromCode: '2000000', toCode: '2078001', label: 'Москва → Симферополь' },
+    { fromCode: '2000000', toCode: '2078750', label: 'Москва → Севастополь' },
+    { fromCode: '2000000', toCode: '2078144', label: 'Москва → Керчь Южная' },
+    { fromCode: '2000000', toCode: '2078770', label: 'Москва → Евпатория-Курорт' },
+    { fromCode: '2000000', toCode: '2078860', label: 'Москва → Саки' },
+    { fromCode: '2004600', toCode: '2078144', label: 'Тверь → Керчь Южная (пересадка из Москвы)' },
+  ],
   SEARCH: {
-    fromCode: '2000000', // Москва (любой вокзал)
-    toCode: '2078001',   // Симферополь
     dates: ['13.07.2026', '14.07.2026', '15.07.2026'],
   },
   CHECK_INTERVAL: '*/10 * * * *',
@@ -54,41 +62,44 @@ async function initBrowser() {
   return browser;
 }
 
-// Разбивает текст страницы на блоки по поездам и ищет плацкарт с ценой/местами
+// Разбивает текст страницы на блоки по поездам и ищет плацкарт с ценой/местами.
+// Структура на странице для каждого поезда: время_отправления...время_прибытия...классы+цены...Выбрать...№номер...маршрут...теги
+// "Выбрать" встречается ровно 1 раз на поезд и отделяет его расписание+цены (до) от номера+маршрута (сразу после).
 function parsePlackartTrains(pageText) {
   const found = [];
 
-  // Каждый блок поезда начинается со времени отправления вида "23:55"
-  const blocks = pageText.split(/(?=^\d{2}:\d{2}$)/m).filter(b => /№\S+/.test(b));
+  const segments = pageText.split(/\nВыбрать\n/);
 
-  for (const block of blocks) {
-    const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+  // segments[i] заканчивается расписанием+ценами поезда i; segments[i+1] начинается с №номера и маршрута этого же поезда i
+  for (let i = 0; i < segments.length - 1; i++) {
+    const schedLines = segments[i].split('\n').map(l => l.trim()).filter(Boolean);
+    const infoLines = segments[i + 1].split('\n').map(l => l.trim()).filter(Boolean);
 
-    const departureTime = lines[0];
-    const trainNumberMatch = block.match(/№(\S+)/);
-    const trainNumber = trainNumberMatch ? trainNumberMatch[1] : '?';
-    const routeMatch = block.match(/Москва\s*—\s*[А-Яа-яёЁ\s]+/);
-    const route = routeMatch ? routeMatch[0].trim() : '';
+    const trainNumberMatch = infoLines[0]?.match(/^№(\S+)/);
+    if (!trainNumberMatch) continue;
+    const trainNumber = trainNumberMatch[1];
+    const route = infoLines[1] && infoLines[1].includes('—') ? infoLines[1] : '';
 
-    // Ищем строку с классом "Плац" или "Плацкарт"
-    const plackartIdx = lines.findIndex(l => /^Плац(карт)?$/i.test(l));
+    // Первое время в этом сегменте — отправление (прибытие идёт позже него)
+    const departureTime = schedLines.find(l => /^\d{2}:\d{2}$/.test(l)) || '?';
 
-    if (plackartIdx !== -1) {
-      const seatsLine = lines[plackartIdx + 1] || '';
-      const priceLine = lines[plackartIdx + 2] || '';
+    const plackartIdx = schedLines.findIndex(l => /^Плац(карт)?$/i.test(l));
+    if (plackartIdx === -1) continue;
 
-      const priceMatch = priceLine.match(/от\s*([\d\s]+,\d+)\s*₽/);
-      const isWaitlist = seatsLine.includes('Лист ожидания') || priceLine.includes('Лист ожидания');
+    const seatsLine = schedLines[plackartIdx + 1] || '';
+    const priceLine = schedLines[plackartIdx + 2] || '';
 
-      if (!isWaitlist && priceMatch) {
-        found.push({
-          departureTime,
-          trainNumber,
-          route,
-          seats: seatsLine,
-          price: priceMatch[1].trim() + ' ₽'
-        });
-      }
+    const priceMatch = priceLine.match(/от\s*([\d\s]+,\d+)\s*₽/);
+    const isWaitlist = seatsLine.includes('Лист ожидания') || priceLine.includes('Лист ожидания');
+
+    if (!isWaitlist && priceMatch) {
+      found.push({
+        departureTime,
+        trainNumber,
+        route,
+        seats: seatsLine,
+        price: priceMatch[1].trim() + ' ₽'
+      });
     }
   }
 
@@ -101,62 +112,67 @@ async function searchTickets() {
 
     const browserInstance = await initBrowser();
 
-    for (const date of CONFIG.SEARCH.dates) {
-      const page = await browserInstance.newPage();
-      try {
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-        await page.setViewport({ width: 1280, height: 900 });
+    for (const route of CONFIG.ROUTES) {
+      console.log(`\n🚉 ${route.label}`);
 
-        const searchUrl = `${CONFIG.BASE_URL}/search/${CONFIG.SEARCH.fromCode}-${CONFIG.SEARCH.toCode}/${date}/`;
-        console.log(`  📅 ${date}`);
-        console.log(`    ⏳ Загружаю (это SPA, жду ~18 сек)...`);
-
+      for (const date of CONFIG.SEARCH.dates) {
+        const page = await browserInstance.newPage();
         try {
-          await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch (navError) {
-          // SPA может сделать повторную навигацию/редирект — это не критично
-        }
+          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+          await page.setViewport({ width: 1280, height: 900 });
 
-        // Ждём пока прогрузится реальный список поездов (а не просто скелет страницы)
-        await page.waitForFunction(
-          () => document.body.innerText.includes('Выберите рейс') || document.body.innerText.length > 3000,
-          { timeout: 25000 }
-        ).catch(() => console.log('    ⚠️  Не дождались явного признака загрузки, парсю как есть'));
+          const searchUrl = `${CONFIG.BASE_URL}/search/${route.fromCode}-${route.toCode}/${date}/`;
+          console.log(`  📅 ${date}`);
+          console.log(`    ⏳ Загружаю (это SPA, жду ~18 сек)...`);
 
-        await page.waitForTimeout(3000);
-
-        const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
-
-        if (!pageText || pageText.length < 500) {
-          console.log(`    ⚠️  Страница не загрузилась (${pageText.length} символов)`);
-          continue;
-        }
-
-        const trains = parsePlackartTrains(pageText);
-        console.log(`    ✓ Плацкарт найден в ${trains.length} поезд(ах)`);
-
-        for (const train of trains) {
-          console.log(`      🎉 №${train.trainNumber} ${train.route} | ${train.departureTime} | ${train.seats} | ${train.price}`);
-
-          const key = `${date}-${train.trainNumber}-${train.seats}`;
-          const now = Date.now();
-          const lastTime = lastNotified.get(key);
-
-          // Не уведомляем повторно о том же самом (та же дата+поезд+места) чаще раза в час
-          if (!lastTime || now - lastTime > 60 * 60 * 1000) {
-            lastNotified.set(key, now);
-            await notifyAboutTickets({
-              date,
-              url: searchUrl,
-              ...train
-            });
+          try {
+            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch (navError) {
+            // SPA может сделать повторную навигацию/редирект — это не критично
           }
-        }
 
-      } catch (error) {
-        console.log(`    ❌ Ошибка [${error.name}]: ${error.message}`);
-      } finally {
-        await page.close();
+          // Ждём пока прогрузится реальный список поездов (а не просто скелет страницы)
+          await page.waitForFunction(
+            () => document.body.innerText.includes('Выберите рейс') || document.body.innerText.length > 3000,
+            { timeout: 25000 }
+          ).catch(() => console.log('    ⚠️  Не дождались явного признака загрузки, парсю как есть'));
+
+          await page.waitForTimeout(3000);
+
+          const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+
+          if (!pageText || pageText.length < 500) {
+            console.log(`    ⚠️  Страница не загрузилась (${pageText.length} символов)`);
+            continue;
+          }
+
+          const trains = parsePlackartTrains(pageText);
+          console.log(`    ✓ Плацкарт найден в ${trains.length} поезд(ах)`);
+
+          for (const train of trains) {
+            console.log(`      🎉 №${train.trainNumber} ${train.route} | ${train.departureTime} | ${train.seats} | ${train.price}`);
+
+            const key = `${route.label}-${date}-${train.trainNumber}-${train.seats}`;
+            const now = Date.now();
+            const lastTime = lastNotified.get(key);
+
+            // Не уведомляем повторно о том же самом (тот же маршрут+дата+поезд+места) чаще раза в час
+            if (!lastTime || now - lastTime > 60 * 60 * 1000) {
+              lastNotified.set(key, now);
+              await notifyAboutTickets({
+                date,
+                url: searchUrl,
+                routeLabel: route.label,
+                ...train
+              });
+            }
+          }
+
+        } catch (error) {
+          console.log(`    ❌ Ошибка [${error.name}]: ${error.message}`);
+        } finally {
+          await page.close();
+        }
       }
     }
 
@@ -169,6 +185,7 @@ async function notifyAboutTickets(info) {
   const message = `
 🎉 *НАЙДЕНЫ БИЛЕТЫ НА ПЛАЦКАРТ!*
 
+🔎 Маршрут поиска: ${info.routeLabel}
 📅 Дата: ${info.date}
 🚂 Поезд №${info.trainNumber} (${info.route})
 ⏰ Отправление: ${info.departureTime}
@@ -191,17 +208,18 @@ ${info.url}
 
 async function startBot() {
   console.log('\n╔════════════════════════════════════╗');
-  console.log('║  🚂 РЖД БОТ v4 - grandtrain.ru    ║');
+  console.log('║  🚂 РЖД БОТ v5 - grandtrain.ru    ║');
   console.log('╚════════════════════════════════════╝\n');
 
   console.log('📋 Параметры:');
-  console.log(`  🚂 Маршрут: Москва → Симферополь (включая транзитные поезда)`);
+  console.log('  🚂 Маршруты:');
+  CONFIG.ROUTES.forEach(r => console.log(`     • ${r.label}`));
   console.log(`  📅 Даты: ${CONFIG.SEARCH.dates.join(', ')}`);
   console.log(`  💺 Ищем: ПЛАЦКАРТ`);
   console.log(`  ⏰ Проверка: каждые 10 минут\n`);
 
   try {
-    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, '✅ РЖД-бот v4 запущен! (grandtrain.ru, с транзитными поездами)');
+    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `✅ РЖД-бот v5 запущен!\n\nМаршруты (${CONFIG.ROUTES.length}):\n${CONFIG.ROUTES.map(r => '• ' + r.label).join('\n')}`);
   } catch (error) {
     console.error('⚠️  Ошибка приветствия:', error.message);
   }
