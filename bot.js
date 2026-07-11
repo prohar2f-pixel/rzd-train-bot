@@ -4,6 +4,13 @@ const puppeteer = require('puppeteer');
 const TelegramBot = require('node-telegram-bot-api');
 const schedule = require('node-schedule');
 
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION (процесс продолжает жить):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('💥 UNHANDLED REJECTION (процесс продолжает жить):', reason);
+});
+
 const CONFIG = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
@@ -30,7 +37,18 @@ async function initBrowser() {
     console.log('🚀 Запускаю браузер...');
     browser = await puppeteer.launch({
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage', // /dev/shm в контейнерах обычно всего 64MB — без этого флага Chromium может молча упасть
+        '--disable-gpu',
+        '--disable-accelerated-2d-canvas'
+      ]
+    });
+
+    browser.on('disconnected', () => {
+      console.log('⚠️  Браузер отключился/упал — пересоздам на следующем цикле');
+      browser = null;
     });
   }
   return browser;
@@ -195,11 +213,19 @@ async function startBot() {
     await searchTickets();
   });
 
-  process.on('SIGINT', async () => {
-    console.log('\n🛑 Завершаю...');
-    if (browser) await browser.close();
+  // Heartbeat — если процесс жив, лог появляется каждую минуту.
+  // Если хартбиты пропадают без "получен SIGTERM" ниже — контейнер убили извне (OOM/платформа).
+  setInterval(() => {
+    console.log(`💓 heartbeat ${new Date().toLocaleTimeString()} (процесс жив)`);
+  }, 60000);
+
+  const shutdown = async (signal) => {
+    console.log(`\n🛑 Получен сигнал ${signal}, завершаю...`);
+    if (browser) await browser.close().catch(() => {});
     process.exit(0);
-  });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 startBot().catch(error => {
