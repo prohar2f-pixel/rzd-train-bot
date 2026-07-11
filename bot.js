@@ -31,7 +31,7 @@ const CONFIG = {
   SEARCH: {
     dates: ['13.07.2026', '14.07.2026', '15.07.2026'],
   },
-  CHECK_INTERVAL: '*/10 * * * *',
+  CHECK_INTERVAL: '*/15 * * * *', // цикл из 7 маршрутов×3 даты занимает ~7-10 мин, нужен запас чтобы не накладывался
   BASE_URL: 'https://grandtrain.ru'
 };
 
@@ -134,7 +134,15 @@ function parsePlackartTrains(pageText, { minLower = 1, minTotal = 3 } = {}) {
   return found;
 }
 
+let isSearching = false;
+
 async function searchTickets() {
+  if (isSearching) {
+    console.log(`\n⏭️  Пропускаю запуск в ${new Date().toLocaleString()} — предыдущий цикл ещё не закончился`);
+    return;
+  }
+  isSearching = true;
+
   try {
     console.log(`\n[${new Date().toLocaleString()}] 🔍 ПРОВЕРКА БИЛЕТОВ (grandtrain.ru)`);
 
@@ -206,6 +214,8 @@ async function searchTickets() {
 
   } catch (error) {
     console.error('❌ Критическая ошибка:', error.message);
+  } finally {
+    isSearching = false;
   }
 }
 
