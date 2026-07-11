@@ -4,8 +4,8 @@
   "description": "РЖД бот для поиска билетов на поезд Москва-Симферополь",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot-smart.js",
-    "dev": "node bot-smart.js"
+    "start": "node bot-final-v2.js",
+    "dev": "node bot-final-v2.js"
   },
   "dependencies": {
     "axios": "^1.18.1",
