@@ -1,0 +1,20 @@
+{
+  "name": "rzd-train-bot",
+  "version": "1.0.0",
+  "description": "РЖД бот для поиска билетов на поезд Москва-Симферополь",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot-simple.js",
+    "dev": "node bot-simple.js"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "dotenv": "^16.3.1",
+    "node-schedule": "^2.1.0",
+    "node-telegram-bot-api": "^0.64.0",
+    "puppeteer": "^21.0.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
