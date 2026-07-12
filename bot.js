@@ -40,9 +40,13 @@ if (!CONFIG.TELEGRAM_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
   process.exit(1);
 }
 
-const bot = new TelegramBot(CONFIG.TELEGRAM_TOKEN, { polling: false });
+const bot = new TelegramBot(CONFIG.TELEGRAM_TOKEN, { polling: true });
+bot.on('polling_error', (err) => {
+  console.error('⚠️  Ошибка polling Telegram (обычно значит, что запущено 2 копии бота с одним токеном):', err.message);
+});
 let browser;
 let lastNotified = new Map(); // ключ -> timestamp, чтобы не спамить одним и тем же
+let currentJob = null; // активная задача node-schedule, null если поиск остановлен
 
 async function initBrowser() {
   if (!browser) {
@@ -246,6 +250,80 @@ ${info.url}
   }
 }
 
+function startScheduledSearch({ runImmediately = true } = {}) {
+  if (currentJob) {
+    console.log('ℹ️  Поиск уже запущен');
+    return false;
+  }
+
+  currentJob = schedule.scheduleJob(CONFIG.CHECK_INTERVAL, async () => {
+    await searchTickets();
+  });
+
+  console.log(`✓ Поиск запущен, проверка каждые 15 минут`);
+  if (runImmediately) searchTickets();
+  return true;
+}
+
+function stopScheduledSearch() {
+  if (!currentJob) {
+    console.log('ℹ️  Поиск уже остановлен');
+    return false;
+  }
+
+  currentJob.cancel();
+  currentJob = null;
+  console.log('🛑 Поиск остановлен (по команде)');
+  return true;
+}
+
+// Реагируем только на сообщения из своего чата — чтобы посторонние не могли управлять ботом
+function isAuthorized(msg) {
+  return String(msg.chat.id) === String(CONFIG.TELEGRAM_CHAT_ID);
+}
+
+const BTN_START = '▶️ Запустить';
+const BTN_STOP = '⏹ Остановить';
+const BTN_STATUS = '📊 Статус';
+
+const keyboard = {
+  reply_markup: {
+    keyboard: [[BTN_START, BTN_STOP], [BTN_STATUS]],
+    resize_keyboard: true
+  }
+};
+
+async function handleStop() {
+  const stopped = stopScheduledSearch();
+  await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, stopped
+    ? '🛑 Поиск остановлен. Нажми «Запустить» чтобы возобновить.'
+    : 'ℹ️ Поиск и так уже остановлен.', keyboard);
+}
+
+async function handleStart() {
+  const started = startScheduledSearch({ runImmediately: true });
+  await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, started
+    ? '✅ Поиск запущен, проверяю билеты...'
+    : 'ℹ️ Поиск уже был запущен.', keyboard);
+}
+
+async function handleStatus() {
+  const state = currentJob ? '🟢 Работает' : '🔴 Остановлен';
+  await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID,
+    `${state}\n\nМаршруты (${CONFIG.ROUTES.length}):\n${CONFIG.ROUTES.map(r => '• ' + r.label).join('\n')}`, keyboard);
+}
+
+bot.onText(/\/stop/, (msg) => isAuthorized(msg) && handleStop());
+bot.onText(/\/start/, (msg) => isAuthorized(msg) && handleStart());
+bot.onText(/\/status/, (msg) => isAuthorized(msg) && handleStatus());
+
+bot.on('message', (msg) => {
+  if (!isAuthorized(msg)) return;
+  if (msg.text === BTN_STOP) handleStop();
+  else if (msg.text === BTN_START) handleStart();
+  else if (msg.text === BTN_STATUS) handleStatus();
+});
+
 async function startBot() {
   console.log('\n╔════════════════════════════════════╗');
   console.log('║  🚂 РЖД БОТ v5 - grandtrain.ru    ║');
@@ -256,20 +334,15 @@ async function startBot() {
   CONFIG.ROUTES.forEach(r => console.log(`     • ${r.label}`));
   console.log(`  📅 Даты: ${CONFIG.SEARCH.dates.join(', ')}`);
   console.log(`  💺 Ищем: ПЛАЦКАРТ`);
-  console.log(`  ⏰ Проверка: каждые 10 минут\n`);
+  console.log(`  ⏰ Проверка: каждые 15 минут\n`);
 
   try {
-    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `✅ РЖД-бот v5 запущен!\n\nМаршруты (${CONFIG.ROUTES.length}):\n${CONFIG.ROUTES.map(r => '• ' + r.label).join('\n')}`);
+    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, `✅ РЖД-бот v5 запущен!\n\nМаршруты (${CONFIG.ROUTES.length}):\n${CONFIG.ROUTES.map(r => '• ' + r.label).join('\n')}`, keyboard);
   } catch (error) {
     console.error('⚠️  Ошибка приветствия:', error.message);
   }
 
-  await searchTickets();
-
-  console.log('\n✓ Следующая проверка через 10 минут...');
-  schedule.scheduleJob(CONFIG.CHECK_INTERVAL, async () => {
-    await searchTickets();
-  });
+  startScheduledSearch({ runImmediately: true });
 
   // Heartbeat — если процесс жив, лог появляется каждую минуту.
   // Если хартбиты пропадают без "получен SIGTERM" ниже — контейнер убили извне (OOM/платформа).
